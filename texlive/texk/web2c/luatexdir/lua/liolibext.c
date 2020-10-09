@@ -629,16 +629,18 @@ static int readintegertable_s(lua_State *L) {
     return 1;
 }
 
+/* from ff */
+
 static int readfixed2(lua_State *L) {
     FILE *f = tofile(L);
     int a = getc(f);
     int b = getc(f);
-    if (b == EOF)
+    if (b == EOF) {
         lua_pushnil(L);
-    else if (a >= 0x80)
-        lua_pushinteger(L, (a - 0x100) + b/0x100);
-    else
-        lua_pushinteger(L, (a        ) + b/0x100);
+    } else {
+        int n = 0x100 * a + b;
+        lua_pushnumber(L,(double) ((n>>8) + ((n&0xff)/256.0)));
+    }
     return 1;
 }
 
@@ -651,10 +653,8 @@ static int readfixed2_s(lua_State *L) {
     } else {
         int a = uchar(s[p++]);
         int b = uchar(s[p]);
-        if (a >= 0x80)
-            lua_pushinteger(L, (a - 0x100) + b/0x100);
-        else
-            lua_pushinteger(L, (a        ) + b/0x100);
+        int n = 0x100 * a + b;
+        lua_pushnumber(L,(double) ((n>>8) + ((n&0xff)/256.0)));
     }
     return 1;
 }
@@ -665,15 +665,12 @@ static int readfixed4(lua_State *L) {
     int b = getc(f);
     int c = getc(f);
     int d = getc(f);
-    if (d == EOF)
+    if (d == EOF) {
         lua_pushnil(L);
-    else if (a >= 0x80)
-        lua_pushnumber(L, (0x100 * a + b - 0x10000) + (0x100 * c + d)/0x10000);
-    else
-        lua_pushnumber(L, (0x100 * a + b          ) + (0x100 * c + d)/0x10000);
-    /* from ff */
-    /* int n = 0x1000000 * a + 0x10000 * b + 0x100 * c + d; */
-    /* lua_pushnumber(L,(real) (n>>16) + ((n&0xffff)/65536.0)); */
+    } else {
+        int n = 0x1000000 * a + 0x10000 * b + 0x100 * c + d;
+        lua_pushnumber(L,(double) ((n>>16) + ((n&0xffff)/65536.0)));
+    }
     return 1;
 }
 
@@ -688,10 +685,8 @@ static int readfixed4_s(lua_State *L) {
         int b = uchar(s[p++]);
         int c = uchar(s[p++]);
         int d = uchar(s[p]);
-        if (a >= 0x80)
-            lua_pushnumber(L, (0x100 * a + b - 0x10000) + (0x100 * c + d)/0x10000);
-        else
-            lua_pushnumber(L, (0x100 * a + b          ) + (0x100 * c + d)/0x10000);
+        int n = 0x1000000 * a + 0x10000 * b + 0x100 * c + d;
+        lua_pushnumber(L,(double) ((n>>16) + ((n&0xffff)/65536.0)));
     }
     return 1;
 }
@@ -705,7 +700,7 @@ static int read2dot14(lua_State *L) {
     } else {
         int n = 0x100 * a + b;
         /* from ff */
-        lua_pushnumber(L,(real) ((n<<16)>>(16+14)) + ((n&0x3fff)/16384.0));
+        lua_pushnumber(L,(double) (((n<<16)>>(16+14)) + ((n&0x3fff)/16384.0)));
     }
     return 1;
 }
@@ -720,7 +715,7 @@ static int read2dot14_s(lua_State *L) {
         int a = uchar(s[p++]);
         int b = uchar(s[p]);
         int n = 0x100 * a + b;
-        lua_pushnumber(L,(real) ((n<<16)>>(16+14)) + ((n&0x3fff)/16384.0));
+        lua_pushnumber(L,(double) (((n<<16)>>(16+14)) + ((n&0x3fff)/16384.0)));
     }
     return 1;
 }
@@ -837,67 +832,6 @@ static int readbytes_s(lua_State *L) {
     }
 }
 
-static int recordfilename(lua_State *L)
-{
-    const char *fname = luaL_checkstring(L, 1);
-    const char *ftype = lua_tostring(L, 2);
-    if (fname != NULL && ftype != NULL) {
-        switch (ftype[1]) {
-            case 'r':
-                recorder_record_input(fname);
-                break;
-            case 'w':
-                recorder_record_output(fname);
-                break;
-            default:
-                /* silently ignore */
-                break;
-        }
-    } else {
-        /* silently ignore */
-    }
-    return 0;
-}
-
-static int checkpermission(lua_State *L)
-{
-    const char *filename = luaL_checkstring(L, 1);
-    if (filename == NULL) {
-        lua_pushboolean(L,0);
-        lua_pushliteral(L,"no command name given");
-    } else if (shellenabledp <= 0) {
-        lua_pushboolean(L,0);
-        lua_pushliteral(L,"all command execution is disabled");
-    } else if (restrictedshell == 0) {
-        lua_pushboolean(L,1);
-        lua_pushstring(L,filename);
-    } else {
-        char *safecmd = NULL;
-        char *cmdname = NULL;
-        switch (shell_cmd_is_allowed(filename, &safecmd, &cmdname)) {
-            case 0:
-                lua_pushboolean(L,0);
-                lua_pushliteral(L, "specific command execution disabled");
-                break;
-            case 1:
-                /* doesn't happen */
-                lua_pushboolean(L,1);
-                lua_pushstring(L,filename);
-                break;
-            case 2:
-                lua_pushboolean(L,1);
-                lua_pushstring(L,safecmd);
-                break;
-            default:
-                /* -1 */
-                lua_pushboolean(L,0);
-                lua_pushliteral(L, "bad command line quoting");
-                break;
-        }
-    }
-    return 2;
-}
-
 static int readline(lua_State *L)
 {
     luaL_Buffer buf;
@@ -950,11 +884,8 @@ static const luaL_Reg fiolib[] = {
     { "readbytes",         readbytes },
     { "readbytetable",     readbytetable },
     { "readline",          readline },
-    /* extras */
-    { "recordfilename",    recordfilename },
-    { "checkpermission",   checkpermission },
     /* done */
-    {NULL, NULL}
+    { NULL, NULL }
 };
 
 static const luaL_Reg siolib[] = {
@@ -974,7 +905,7 @@ static const luaL_Reg siolib[] = {
     { "readbytes",         readbytes_s },
     { "readbytetable",     readbytetable_s },
     /* done */
-    {NULL, NULL}
+    { NULL, NULL }
 };
 
 /*

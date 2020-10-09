@@ -2,7 +2,7 @@
 ** DVIToSVG.cpp                                                         **
 **                                                                      **
 ** This file is part of dvisvgm -- a fast DVI to SVG converter          **
-** Copyright (C) 2005-2018 Martin Gieseking <martin.gieseking@uos.de>   **
+** Copyright (C) 2005-2020 Martin Gieseking <martin.gieseking@uos.de>   **
 **                                                                      **
 ** This program is free software; you can redistribute it and/or        **
 ** modify it under the terms of the GNU General Public License as       **
@@ -22,11 +22,13 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <iomanip>
 #include <set>
 #include <sstream>
 #include "Calculator.hpp"
 #include "DVIToSVG.hpp"
 #include "DVIToSVGActions.hpp"
+#include "FileSystem.hpp"
 #include "Font.hpp"
 #include "FontManager.hpp"
 #include "GlyphTracerMessages.hpp"
@@ -36,9 +38,11 @@
 #include "PageSize.hpp"
 #include "PreScanDVIReader.hpp"
 #include "SignalHandler.hpp"
+#include "optimizer/SVGOptimizer.hpp"
 #include "SVGOutput.hpp"
 #include "utility.hpp"
 #include "version.hpp"
+#include "XXHashFunction.hpp"
 
 ///////////////////////////////////
 // special handlers
@@ -67,6 +71,7 @@ using namespace std;
  *   0 : only trace actually required glyphs */
 char DVIToSVG::TRACE_MODE = 0;
 bool DVIToSVG::COMPUTE_PROGRESS = false;
+DVIToSVG::HashSettings DVIToSVG::PAGE_HASH_SETTINGS;
 
 
 DVIToSVG::DVIToSVG (istream &is, SVGOutputBase &out) : DVIReader(is), _out(out)
@@ -83,8 +88,8 @@ DVIToSVG::DVIToSVG (istream &is, SVGOutputBase &out) : DVIReader(is), _out(out)
 /** Starts the conversion process.
  *  @param[in] first number of first page to convert
  *  @param[in] last number of last page to convert
- *  @param[out] pageinfo (number of converted pages, number of total pages) */
-void DVIToSVG::convert (unsigned first, unsigned last, pair<int,int> *pageinfo) {
+ *  @param[in] hashFunc pointer to function to be used to compute page hashes */
+void DVIToSVG::convert (unsigned first, unsigned last, HashFunction *hashFunc) {
 	if (first > last)
 		swap(first, last);
 	if (first > numberOfPages()) {
@@ -95,25 +100,57 @@ void DVIToSVG::convert (unsigned first, unsigned last, pair<int,int> *pageinfo) 
 		throw DVIException(oss.str());
 	}
 	last = min(last, numberOfPages());
+	bool computeHashes = (hashFunc && !_out.ignoresHashes());
+	string shortenedOptHash = XXH32HashFunction(PAGE_HASH_SETTINGS.optionsHash()).digestString();
 	for (unsigned i=first; i <= last; ++i) {
-		executePage(i);
-		_svg.removeRedundantElements();
-		embedFonts(_svg.rootNode());
-		bool success = _svg.write(_out.getPageStream(currentPageNumber(), numberOfPages()));
-		string fname = _out.filename(i, numberOfPages());
-		if (fname.empty())
-			fname = "<stdout>";
-		if (success)
-			Message::mstream(false, Message::MC_PAGE_WRITTEN) << "\noutput written to " << fname << '\n';
-		else
-			Message::wstream(true) << "failed to write output to " << fname << '\n';
-		_svg.reset();
-		_actions->reset();
+		string dviHash, combinedHash;
+		if (computeHashes) {
+			computePageHash(i, *hashFunc);
+			dviHash = hashFunc->digestString();
+			hashFunc->update(PAGE_HASH_SETTINGS.optionsHash());
+			combinedHash = hashFunc->digestString();
+		}
+		const SVGOutput::HashTriple hashTriple(dviHash, shortenedOptHash, combinedHash);
+		FilePath path = _out.filepath(i, numberOfPages(), hashTriple);
+		if (!dviHash.empty() && !PAGE_HASH_SETTINGS.isSet(HashSettings::P_REPLACE) && path.exists()) {
+			Message::mstream(false, Message::MC_PAGE_NUMBER) << "skipping page " << i;
+			Message::mstream().indent(1);
+			Message::mstream(false, Message::MC_PAGE_WRITTEN) << "\nfile " << path.shorterAbsoluteOrRelative() << " exists\n";
+			Message::mstream().indent(0);
+		}
+		else {
+			executePage(i);
+			SVGOptimizer(_svg).execute();
+			embedFonts(_svg.rootNode());
+			bool success = _svg.write(_out.getPageStream(currentPageNumber(), numberOfPages(), hashTriple));
+			string fname = path.shorterAbsoluteOrRelative();
+			if (fname.empty())
+				fname = "<stdout>";
+			if (success)
+				Message::mstream(false, Message::MC_PAGE_WRITTEN) << "\noutput written to " << fname << '\n';
+			else
+				Message::wstream(true) << "failed to write output to " << fname << '\n';
+			_svg.reset();
+			_actions->reset();
+		}
 	}
-	if (pageinfo) {
-		pageinfo->first = last-first+1;
-		pageinfo->second = numberOfPages();
-	}
+}
+
+
+/** Creates a HashFunction object for a given algorithm name.
+ *  @param[in] algo name of hash algorithm
+ *  @return pointer to hash function
+ *  @throw MessageException if algorithm name is invalid or not supported */
+static unique_ptr<HashFunction> create_hash_function (const string &algo) {
+	if (auto hashFunc = HashFunction::create(algo))
+		return hashFunc;
+
+	string msg = "unknown hash algorithm '"+algo+"' (supported algorithms: ";
+	for (const string &name : HashFunction::supportedAlgorithms())
+		msg += name + ", ";
+	msg.pop_back();
+	msg.back() = ')';
+	throw MessageException(msg);
 }
 
 
@@ -126,7 +163,7 @@ void DVIToSVG::convert (const string &rangestr, pair<int,int> *pageinfo) {
 		throw MessageException("invalid page range format");
 
 	Message::mstream(false, Message::MC_PAGE_NUMBER) << "pre-processing DVI file (format version "  << getDVIVersion() << ")\n";
-	if (DVIToSVGActions *actions = dynamic_cast<DVIToSVGActions*>(_actions.get())) {
+	if (auto actions = dynamic_cast<DVIToSVGActions*>(_actions.get())) {
 		PreScanDVIReader prescan(getInputStream(), actions);
 		actions->setDVIReader(prescan);
 		prescan.executeAllPages();
@@ -134,12 +171,47 @@ void DVIToSVG::convert (const string &rangestr, pair<int,int> *pageinfo) {
 		SpecialManager::instance().notifyPreprocessingFinished();
 	}
 
+	unique_ptr<HashFunction> hashFunc;
+	if (!PAGE_HASH_SETTINGS.algorithm().empty())  // name of hash algorithm present?
+		hashFunc = create_hash_function(PAGE_HASH_SETTINGS.algorithm());
+
 	for (const auto &range : ranges)
-		convert(range.first, range.second);
+		convert(range.first, range.second, hashFunc.get());
 	if (pageinfo) {
 		pageinfo->first = ranges.numberOfPages();
 		pageinfo->second = numberOfPages();
 	}
+}
+
+
+/** Writes the hash values of a selected set of pages to an output stream.
+ *  @param[in] rangestr string describing the pages to convert
+ *  @param[in,out] os stream the output is written to */
+void DVIToSVG::listHashes (const string &rangestr, std::ostream &os) {
+	PageRanges ranges;
+	if (!ranges.parse(rangestr, numberOfPages()))
+		throw MessageException("invalid page range format");
+
+	XXH32HashFunction xxh32;
+	auto hashFunc = create_hash_function(PAGE_HASH_SETTINGS.algorithm());
+	int width1 = util::ilog10(numberOfPages())+1;
+	int width2 = hashFunc->digestSize()*2;
+	int spaces1 = width1+2+(width2-3)/2;
+	int spaces2 = width1+2+width2+2-spaces1-3+(width2-7)/2;
+	string shortenedOptHash = XXH32HashFunction(PAGE_HASH_SETTINGS.optionsHash()).digestString();
+	os << string(spaces1, ' ') << "DVI"
+		<< string(spaces2, ' ') << "DVI+opt\n";
+	for (const auto &range : ranges) {
+		for (int i=range.first; i <= range.second; i++) {
+			computePageHash(i, *hashFunc);
+			os << setw(width1) << i;
+			os << ": " << hashFunc->digestString();
+			hashFunc->update(PAGE_HASH_SETTINGS.optionsHash());
+			os << ", " << hashFunc->digestString() << '\n';
+		}
+	}
+	os << "hash algorithm: " << PAGE_HASH_SETTINGS.algorithm()
+		<< ", options hash: " << shortenedOptHash << '\n';
 }
 
 
@@ -173,7 +245,7 @@ void DVIToSVG::enterBeginPage (unsigned pageno, const vector<int32_t> &c) {
 		if (pageno != (unsigned)c[0])  // Does page number shown on page differ from physical page number?
 			Message::mstream(false) << " [" << c[0] << ']';
 		Message::mstream().indent(1);
-		_svg.appendToDoc(util::make_unique<XMLCommentNode>(" This file was generated by dvisvgm " + string(PROGRAM_VERSION) + " "));
+		_svg.appendToDoc(util::make_unique<XMLComment>(" This file was generated by dvisvgm " + string(PROGRAM_VERSION) + " "));
 	}
 }
 
@@ -252,7 +324,7 @@ Matrix DVIToSVG::getPageTransformation () const {
 			calc.setVariable("h",  bbox.height()*bp2pt);
 		}
 		// add constants for length units to calculator
-		for (auto unit : Length::getUnits())
+		for (const auto &unit : Length::getUnits())
 			calc.setVariable(unit.first, Length(1, unit.second).pt());
 		matrix.set(_transCmds, calc);
 	}
@@ -261,18 +333,22 @@ Matrix DVIToSVG::getPageTransformation () const {
 
 
 static void collect_chars (unordered_map<const Font*, set<int>> &fontmap) {
+	unordered_map<const Font*, set<int>> insertedChars;
 	for (const auto &entry : fontmap) {
-		if (entry.first->uniqueFont() != entry.first) {
+		const Font *unique_font = entry.first->uniqueFont();
+		if (unique_font != entry.first) {
 			for (int c : entry.second)
-				fontmap[entry.first->uniqueFont()].insert(c);
+				insertedChars[unique_font].insert(c);
 		}
 	}
+	for (const auto &entry : insertedChars)
+		fontmap[entry.first].insert(entry.second.begin(), entry.second.end());
 }
 
 
 /** Adds the font information to the SVG tree.
  *  @param[in] svgElement the font nodes are added to this node */
-void DVIToSVG::embedFonts (XMLElementNode *svgElement) {
+void DVIToSVG::embedFonts (XMLElement *svgElement) {
 	if (!svgElement || !_actions) // no dvi actions => no chars written => no fonts to embed
 		return;
 
@@ -285,7 +361,7 @@ void DVIToSVG::embedFonts (XMLElementNode *svgElement) {
 	unordered_set<const Font*> tracedFonts;  // collect unique fonts already traced
 	for (const auto &fontchar : usedCharsMap) {
 		const Font *font = fontchar.first;
-		if (const PhysicalFont *ph_font = dynamic_cast<const PhysicalFont*>(font)) {
+		if (auto ph_font = dynamic_cast<const PhysicalFont*>(font)) {
 			// Check if glyphs should be traced. Only trace the glyphs of unique fonts, i.e.
 			// avoid retracing the same glyphs again if they are referenced in various sizes.
 			if (TRACE_MODE != 0 && tracedFonts.find(ph_font->uniqueFont()) == tracedFonts.end()) {
@@ -350,8 +426,8 @@ void DVIToSVG::setProcessSpecials (const char *ignorelist, bool pswarning) {
 }
 
 
-string DVIToSVG::getSVGFilename (unsigned pageno) const {
-	return _out.filename(pageno, numberOfPages());
+FilePath DVIToSVG::getSVGFilePath (unsigned pageno) const {
+	return _out.filepath(pageno, numberOfPages());
 }
 
 
@@ -478,4 +554,36 @@ void DVIToSVG::dviXGlyphString (vector<double> &dx, vector<uint16_t> &glyphs, co
 
 void DVIToSVG::dviXTextAndGlyphs (vector<double> &dx, vector<double> &dy, vector<uint16_t>&, vector<uint16_t> &glyphs, const Font &font) {
 	dviXGlyphArray(dx, dy, glyphs, font);
+}
+
+///////////////////////////////////////////////////////////////
+
+/** Parses a string consisting of comma-separated words, and assigns
+ *  the values to the hash settings. */
+void DVIToSVG::HashSettings::setParameters (const string &paramstr) {
+	auto paramnames = util::split(paramstr, ",");
+	map<string, Parameter> paramMap = {
+		{"list", P_LIST},
+		{"replace", P_REPLACE}
+	};
+	for (string &name : paramnames) {
+		name = util::trim(name);
+		auto it = paramMap.find(name);
+		if (it != paramMap.end())
+			_params.insert(it->second);
+		else if (_algo.empty() && HashFunction::isSupportedAlgorithm(name))
+			_algo = name;
+		else if (!name.empty()) {
+			string msg = "invalid hash parameter '"+name+"' (supported algorithms: ";
+			for (string str : HashFunction::supportedAlgorithms())
+				msg += str + ", ";
+			msg.pop_back();
+			msg.pop_back();
+			msg += ')';
+			throw MessageException(msg);
+		}
+	}
+	// set default hash algorithm if none is given
+	if (_algo.empty())
+		_algo = "xxh64";
 }

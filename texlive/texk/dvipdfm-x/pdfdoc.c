@@ -1,6 +1,6 @@
 /* This is dvipdfmx, an eXtended version of dvipdfm by Mark A. Wicks.
 
-    Copyright (C) 2008-2018 by Jin-Hwan Cho, Matthias Franz, and Shunsaku Hirata,
+    Copyright (C) 2008-2019 by Jin-Hwan Cho, Matthias Franz, and Shunsaku Hirata,
     the dvipdfmx project team.
     
     Copyright (C) 1998, 1999 by Mark A. Wicks <mwicks@kettering.edu>
@@ -29,12 +29,11 @@
 #include <config.h>
 #endif
 
-#include <time.h>
-
 #include "system.h"
 #include "mem.h"
 #include "error.h"
 #include "mfileio.h"
+#include "dpxconf.h"
 
 #include "numbers.h"
 
@@ -66,8 +65,6 @@
 #define PDFDOC_PAGES_ALLOC_SIZE   128u
 #define PDFDOC_ARTICLE_ALLOC_SIZE 16
 #define PDFDOC_BEAD_ALLOC_SIZE    16
-
-static int verbose = 0;
 
 static char  manual_thumb_enabled  = 0;
 static char *thumb_basename = NULL;
@@ -113,14 +110,6 @@ read_thumbnail (const char *thumb_filename)
   return image_ref;
 }
 
-void
-pdf_doc_set_verbose (void)
-{
-  verbose++;
-  pdf_font_set_verbose();
-  pdf_color_set_verbose();
-  pdf_ximage_set_verbose();
-}
 
 typedef struct pdf_form
 {
@@ -427,72 +416,6 @@ pdf_doc_set_eop_content (const char *content, unsigned length)
   return;
 }
 
-#ifndef HAVE_TM_GMTOFF
-#ifndef HAVE_TIMEZONE
-
-/* auxiliary function to compute timezone offset on
-   systems that do not support the tm_gmtoff in struct tm,
-   or have a timezone variable.  Such as i386-solaris.  */
-
-static int32_t
-compute_timezone_offset()
-{
-  time_t now;
-  struct tm tm;
-  struct tm local;
-  time_t gmtoff;
-
-  now = get_unique_time_if_given();
-  if (now == INVALID_EPOCH_VALUE) {
-    now = time(NULL);
-    localtime_r(&now, &local);
-    gmtime_r(&now, &tm);
-    return (mktime(&local) - mktime(&tm));
-  } else {
-    return(0);
-  }
-}
-
-#endif /* HAVE_TIMEZONE */
-#endif /* HAVE_TM_GMTOFF */
-
-/*
- * Docinfo
- */
-static int
-asn_date (char *date_string)
-{
-  int32_t     tz_offset;
-  time_t      current_time;
-  struct tm  *bd_time;
-
-  current_time = get_unique_time_if_given();
-  if (current_time == INVALID_EPOCH_VALUE) {
-    time(&current_time);
-    bd_time = localtime(&current_time);
-
-#ifdef HAVE_TM_GMTOFF
-    tz_offset = bd_time->tm_gmtoff;
-#else
-#  ifdef HAVE_TIMEZONE
-    tz_offset = -timezone;
-#  else
-    tz_offset = compute_timezone_offset();
-#  endif /* HAVE_TIMEZONE */
-#endif /* HAVE_TM_GMTOFF */
-  } else {
-    bd_time = gmtime(&current_time);
-    tz_offset = 0;
-  }
-  sprintf(date_string, "D:%04d%02d%02d%02d%02d%02d%c%02d'%02d'",
-          bd_time->tm_year + 1900, bd_time->tm_mon + 1, bd_time->tm_mday,
-          bd_time->tm_hour, bd_time->tm_min, bd_time->tm_sec,
-          (tz_offset > 0) ? '+' : '-', abs(tz_offset) / 3600,
-                                      (abs(tz_offset) / 60) % 60);
-
-  return strlen(date_string);
-}
-
 static void
 pdf_doc_init_docinfo (pdf_doc *p)
 {
@@ -556,7 +479,7 @@ pdf_doc_close_docinfo (pdf_doc *p)
   if (!pdf_lookup_dict(docinfo, "CreationDate")) {
     char now[32];
 
-    asn_date(now);
+    dpx_util_format_asn_date(now, 1);
     pdf_add_dict(docinfo, 
                  pdf_new_name ("CreationDate"),
                  pdf_new_string(now, strlen(now)));
@@ -597,6 +520,9 @@ pdf_doc_get_page_resources (pdf_doc *p, const char *category)
   if (!resources) {
     resources = pdf_new_dict();
     pdf_add_dict(res_dict, pdf_new_name(category), resources);
+  } else if (pdf_obj_typeof(resources) == PDF_INDIRECT) {
+    resources = pdf_deref_obj(resources); /* FIXME: deref_obj increment link count */
+    pdf_release_obj(resources); /* FIXME: just to decrement link count */
   }
 
   return resources;
@@ -610,10 +536,12 @@ pdf_doc_add_page_resource (const char *category,
   pdf_obj *resources;
   pdf_obj *duplicate;
 
+#if 0
   if (!PDF_OBJ_INDIRECTTYPE(resource_ref)) {
     WARN("Passed non indirect reference...");
     resource_ref = pdf_ref_obj(resource_ref); /* leak */
   }
+#endif
   resources = pdf_doc_get_page_resources(p, category);
   duplicate = pdf_lookup_dict(resources, resource_name);
   if (duplicate && pdf_compare_reference(duplicate, resource_ref)) {
@@ -922,7 +850,7 @@ pdf_doc_get_page_count (pdf_file *pf)
 }
 
 static int
-set_bounding_box (pdf_rect *bbox, int option,
+set_bounding_box (pdf_rect *bbox, enum pdf_page_boundary opt_bbox,
                   pdf_obj *media_box, pdf_obj *crop_box,
                   pdf_obj *art_box, pdf_obj *trim_box, pdf_obj *bleed_box)
 {
@@ -942,7 +870,7 @@ set_bounding_box (pdf_rect *bbox, int option,
   VALIDATE_BOX(trim_box);
   VALIDATE_BOX(bleed_box);
 
-  if (option == 0) {
+  if (opt_bbox == pdf_page_boundary__auto) {
     if (crop_box)
       box = pdf_link_obj(crop_box);
     else if (art_box)
@@ -968,20 +896,20 @@ set_bounding_box (pdf_rect *bbox, int option,
       bleed_box = pdf_link_obj(crop_box);
     }
     /* At this point all boxes must be defined. */
-    switch (option) {
-    case 1: /* crop box */
+    switch (opt_bbox) {
+    case pdf_page_boundary_cropbox:
       box = pdf_link_obj(crop_box);
       break;
-    case 2: /* mdeia box */
+    case pdf_page_boundary_mediabox:
       box = pdf_link_obj(media_box);
       break;
-    case 3: /* art box */
+    case pdf_page_boundary_artbox:
       box = pdf_link_obj(art_box);
       break;
-    case 4: /* trim box */
+    case pdf_page_boundary_trimbox:
       box = pdf_link_obj(trim_box);
       break;
-    case 5: /* bleen box */
+    case pdf_page_boundary_bleedbox:
       box = pdf_link_obj(bleed_box);
       break;
     default:
@@ -1016,7 +944,8 @@ set_bounding_box (pdf_rect *bbox, int option,
     }
 
     /* New scheme only for XDV files */
-    if (is_xdv || option) {
+    if (dpx_conf.compat_mode == dpx_mode_xdv_mode ||
+        opt_bbox != pdf_page_boundary__auto) {
       for (i = 4; i--; ) {
         double x;
         pdf_obj *tmp = pdf_deref_obj(pdf_get_array(media_box, i));
@@ -1155,7 +1084,7 @@ set_transform_matrix (pdf_tmatrix *matrix, pdf_rect *bbox, pdf_obj *rotate)
  */
 pdf_obj *
 pdf_doc_get_page (pdf_file *pf,
-                  int page_no, int options,             /* load options */
+                  int page_no, enum pdf_page_boundary opt_bbox, /* load options */
                   pdf_rect *bbox, pdf_tmatrix *matrix,  /* returned value */
                   pdf_obj **resources_p /* returned values */
                   ) {
@@ -1279,7 +1208,7 @@ pdf_doc_get_page (pdf_file *pf,
     *resources_p = pdf_link_obj(resources);
 
   /* Select page boundary box */
-  error = set_bounding_box(bbox, options, media_box, crop_box, art_box, trim_box, bleed_box);
+  error = set_bounding_box(bbox, opt_bbox, media_box, crop_box, art_box, trim_box, bleed_box);
   if (error)
     goto error_exit;
   /* Set transformation matrix */
@@ -1801,7 +1730,7 @@ pdf_doc_close_names (pdf_doc *p)
       else {
         name_tree = pdf_names_create_tree(data, &count, &pdoc.gotos);
 
-        if (verbose && count < data->count)
+        if (dpx_conf.verbose_level > 0 && count < data->count)
           MESG("\nRemoved %ld unused PDF destinations\n", data->count-count);
 
         if (count < pdoc.gotos.count)
@@ -1856,7 +1785,6 @@ pdf_doc_add_annot (unsigned page_no, const pdf_rect *rect,
   pdf_doc  *p = &pdoc;
   pdf_page *page;
   pdf_obj  *rect_array;
-  double    annot_grow = p->opt.annot_grow;
   double    xpos, ypos;
   pdf_rect  annbox;
 
@@ -1888,10 +1816,10 @@ pdf_doc_add_annot (unsigned page_no, const pdf_rect *rect,
   }
 
   rect_array = pdf_new_array();
-  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.llx - annot_grow, 0.001)));
-  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.lly - annot_grow, 0.001)));
-  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.urx + annot_grow, 0.001)));
-  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.ury + annot_grow, 0.001)));
+  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.llx, 0.001)));
+  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.lly, 0.001)));
+  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.urx, 0.001)));
+  pdf_add_array(rect_array, pdf_new_number(ROUND(annbox.ury, 0.001)));
   pdf_add_dict (annot_dict, pdf_new_name("Rect"), rect_array);
 
   pdf_add_array(page->annots, pdf_ref_obj(annot_dict));
@@ -2566,23 +2494,24 @@ pdf_doc_add_page_content (const char *buffer, unsigned length)
   return;
 }
 
-static char *doccreator = NULL; /* Ugh */
-
 void
 pdf_open_document (const char *filename,
-                   int enable_encrypt, int enable_objstm,
-                   double media_width, double media_height,
-                   double annot_grow_amount, int bookmark_open_depth,
-                   int check_gotos)
+                   const char *creator, const unsigned char *id1, const unsigned char *id2,
+                   struct pdf_setting settings)
 {
   pdf_doc *p = &pdoc;
 
-  pdf_out_init(filename, enable_encrypt, enable_objstm);
+  if (settings.enable_encrypt)
+    pdf_init_encryption(settings.encrypt, id1);
+
+  pdf_out_init(filename, settings.enable_encrypt,
+               settings.object.enable_objstm, settings.object.enable_predictor);
+  pdf_files_init();
 
   pdf_doc_init_catalog(p);
 
-  p->opt.annot_grow = annot_grow_amount;
-  p->opt.outline_open_depth = bookmark_open_depth;
+  p->opt.annot_grow = settings.annot_grow_amount;
+  p->opt.outline_open_depth = settings.outline_open_depth;
 
   pdf_init_resources();
   pdf_init_colors();
@@ -2591,34 +2520,40 @@ pdf_open_document (const char *filename,
   pdf_init_images();
 
   pdf_doc_init_docinfo(p);
-  if (doccreator) {
+  if (creator) {
     pdf_add_dict(p->info,
                  pdf_new_name("Creator"),
-                 pdf_new_string(doccreator, strlen(doccreator)));
-    RELEASE(doccreator); doccreator = NULL;
+                 pdf_new_string(creator, strlen(creator)));
   }
 
-  pdf_doc_init_bookmarks(p, bookmark_open_depth);
+  pdf_doc_init_bookmarks(p, settings.outline_open_depth);
   pdf_doc_init_articles (p);
-  pdf_doc_init_names    (p, check_gotos);
-  pdf_doc_init_page_tree(p, media_width, media_height);
+  pdf_doc_init_names    (p, settings.check_gotos);
+  pdf_doc_init_page_tree(p, settings.media_width, settings.media_height);
 
   pdf_doc_set_bgcolor(NULL);
 
-  if (enable_encrypt) {
+  if (settings.enable_encrypt) {
     pdf_obj *encrypt = pdf_encrypt_obj();
     pdf_set_encrypt(encrypt);
     pdf_release_obj(encrypt);
   }
-  pdf_set_id(pdf_enc_id_array());
+  if (id1 && id2) {
+    pdf_obj *id_obj = pdf_new_array();
+
+    pdf_add_array(id_obj, pdf_new_string(id1, 16));
+    pdf_add_array(id_obj, pdf_new_string(id2, 16));
+    pdf_set_id(id_obj);
+  }
 
   /* Create a default name for thumbnail image files */
   if (manual_thumb_enabled) {
     if (strlen(filename) > 4 &&
         !strncmp(".pdf", filename + strlen(filename) - 4, 4)) {
-      thumb_basename = NEW(strlen(filename)-4+1, char);
-      strncpy(thumb_basename, filename, strlen(filename)-4);
-      thumb_basename[strlen(filename)-4] = 0;
+      size_t len = strlen(filename) - strlen(".pdf");
+      thumb_basename = NEW(len+1, char);
+      strncpy(thumb_basename, filename, len);
+      thumb_basename[len] = 0;
     } else {
       thumb_basename = NEW(strlen(filename)+1, char);
       strcpy(thumb_basename, filename);
@@ -2626,26 +2561,19 @@ pdf_open_document (const char *filename,
   }
 
   p->pending_forms = NULL;
-   
+
+  pdf_init_device(settings.device.dvi2pts, settings.device.precision,
+                  settings.device.ignore_colors);
+
   return;
 }
-
-void
-pdf_doc_set_creator (const char *creator)
-{
-  if (!creator ||
-      creator[0] == '\0')
-    return;
-
-  doccreator = NEW(strlen(creator)+1, char);
-  strcpy(doccreator, creator); /* Ugh */
-}
-
 
 void
 pdf_close_document (void)
 {
   pdf_doc *p = &pdoc;
+
+  pdf_close_device();
 
   /*
    * Following things were kept around so user can add dictionary items.
@@ -2664,6 +2592,7 @@ pdf_close_document (void)
 
   pdf_close_resources(); /* Should be at last. */
 
+  pdf_files_close();
   pdf_out_flush();
 
   if (thumb_basename)
@@ -2878,13 +2807,22 @@ pdf_doc_end_annot (void)
 void
 pdf_doc_break_annot (void)
 {
+  pdf_doc *p = &pdoc;
+  double   g = p->opt.annot_grow;
+
   if (breaking_state.dirty) {
     pdf_obj  *annot_dict;
+    pdf_rect  rect;
 
     /* Copy dict */
     annot_dict = pdf_new_dict();
     pdf_merge_dict(annot_dict, breaking_state.annot_dict);
-    pdf_doc_add_annot(pdf_doc_current_page_number(), &(breaking_state.rect),
+    rect = breaking_state.rect;
+    rect.llx -= g;
+    rect.lly -= g;
+    rect.urx += g;
+    rect.ury += g;
+    pdf_doc_add_annot(pdf_doc_current_page_number(), &rect,
                       annot_dict, !breaking_state.broken);
     pdf_release_obj(annot_dict);
 

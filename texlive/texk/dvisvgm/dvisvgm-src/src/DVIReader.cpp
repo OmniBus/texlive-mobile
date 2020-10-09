@@ -2,7 +2,7 @@
 ** DVIReader.cpp                                                        **
 **                                                                      **
 ** This file is part of dvisvgm -- a fast DVI to SVG converter          **
-** Copyright (C) 2005-2018 Martin Gieseking <martin.gieseking@uos.de>   **
+** Copyright (C) 2005-2020 Martin Gieseking <martin.gieseking@uos.de>   **
 **                                                                      **
 ** This program is free software; you can redistribute it and/or        **
 ** modify it under the terms of the GNU General Public License as       **
@@ -27,6 +27,7 @@
 #include "DVIReader.hpp"
 #include "Font.hpp"
 #include "FontManager.hpp"
+#include "HashFunction.hpp"
 #include "VectorStream.hpp"
 
 using namespace std;
@@ -68,7 +69,7 @@ void DVIReader::executeAll () {
 
 /** Reads and executes the commands of a single page.
  *  This methods stops reading after the page's eop command has been executed.
- *  @param[in] n number of page to be executed
+ *  @param[in] n number of page to be executed (1-based)
  *  @returns true if page was read successfully */
 bool DVIReader::executePage (unsigned n) {
 	clearStream();    // reset all status bits
@@ -132,13 +133,45 @@ void DVIReader::collectBopOffsets () {
 	_bopOffsets.push_back(tell());      // also add offset of postamble
 	readByte();                         // skip post command
 	uint32_t offset = readUnsigned(4);  // offset of final bop
-	while ((int32_t)offset > 0) {       // not yet on first bop?
+	while (int32_t(offset) != -1) {     // not yet on first bop?
 		_bopOffsets.push_back(offset);   // record offset
-		seek(offset+41);                 // skip bop command and the 10 \count values => now on offset of previous bop
-		offset = readUnsigned(4);
+		seek(offset);                    // now on previous bop
+		if (readByte() != OP_BOP)
+			throw DVIException("bop offset at "+to_string(offset)+" doesn't point to bop command" );
+		seek(40, ios::cur);              // skip the 10 \count values => now on offset of previous bop
+		uint32_t prevOffset = readUnsigned(4);
+		if ((prevOffset >= offset && int32_t(prevOffset) != -1))
+			throw DVIException("invalid bop offset at "+to_string(tell()-static_cast<streamoff>(4)));
+		offset = prevOffset;
 	}
 	reverse(_bopOffsets.begin(), _bopOffsets.end());
 }
+
+
+/** Computes a hash value for a given page. The hash algorithm is selected by
+ *  a HashFunction object which will also contain the resulting hash value if
+ *  this function returns true.
+ *  @param[in] pageno number of page to process (1-based)
+ *  @param[in,out] hashFunc hash function to use
+ *  @return true on success, hashFunc contains the resulting hash value */
+bool DVIReader::computePageHash (size_t pageno, HashFunction &hashFunc) {
+	if (pageno == 0 || pageno > numberOfPages())
+		return false;
+
+	hashFunc.reset();
+	clearStream();
+	seek(_bopOffsets[pageno-1]+45);  // now on first command after bop of selected page
+	const size_t BUFSIZE = 4096;
+	char buf[BUFSIZE];
+	size_t numBytes = numberOfPageBytes(pageno-1)-46;  // number of bytes excluding bop and eop
+	while (numBytes > 0) {
+		getInputStream().read(buf, min(numBytes, BUFSIZE));
+		hashFunc.update(buf, getInputStream().gcount());
+		numBytes -= getInputStream().gcount();
+	}
+	return true;
+}
+
 
 /////////////////////////////////////
 
@@ -174,7 +207,7 @@ void DVIReader::cmdPost (int) {
 	uint32_t pageWidth  = readUnsigned(4); // width of widest page in dvi units
 	uint16_t stackDepth = readUnsigned(2); // max. stack depth required
 	uint16_t numPages = readUnsigned(2);
-	if (numPages != numberOfPages())
+	if (numPages != (numberOfPages() & 0xffff))
 		throw DVIException("page count in postamble doesn't match actual number of pages");
 
 	// 1 dviunit * num/den == multiples of 0.0000001m
@@ -244,7 +277,7 @@ void DVIReader::cmdPop (int) {
  *  @param[in] font current font (corresponding to _currFontNum)
  *  @param[in] c character to typeset */
 void DVIReader::putVFChar (Font *font, uint32_t c) {
-	if (VirtualFont *vf = dynamic_cast<VirtualFont*>(font)) { // is current font a virtual font?
+	if (auto vf = dynamic_cast<VirtualFont*>(font)) { // is current font a virtual font?
 		if (const vector<uint8_t> *dvi = vf->getDVI(c)) { // try to get DVI snippet that represents character c
 			FontManager &fm = FontManager::instance();
 			DVIState savedState = _dviState;  // save current cursor position
@@ -424,11 +457,8 @@ void DVIReader::cmdDir (int) {
 	uint8_t wmode = readUnsigned(1);
 	if (wmode == 4)  // yoko mode (4) equals default LR mode (0)
 		wmode = 0;
-	if (wmode == 2 || wmode > 3) {
-		ostringstream oss;
-		oss << "invalid writing mode value " << wmode << " (0, 1, 3, or 4 expected)";
-		throw DVIException(oss.str());
-	}
+	if (wmode == 2 || wmode > 3)
+		throw DVIException("invalid writing mode value " + std::to_string(wmode) + " (0, 1, 3, or 4 expected)");
 	_dviState.d = (WritingMode)wmode;
 	dviDir(_dviState.d);
 }
@@ -452,11 +482,8 @@ void DVIReader::setFont (int fontnum, SetFontMode mode) {
 		_currFontNum = fontnum;
 		dviFontNum(uint32_t(fontnum), mode, font);
 	}
-	else {
-		ostringstream oss;
-		oss << "undefined font number " << fontnum;
-		throw DVIException(oss.str());
-	}
+	else
+		throw DVIException("undefined font number " + std::to_string(fontnum));
 }
 
 
@@ -489,7 +516,7 @@ const Font* DVIReader::defineFont (uint32_t fontnum, const string &name, uint32_
 	if (!font) {
 		int id = fm.registerFont(fontnum, name, cs, ds, ss);
 		font = fm.getFontById(id);
-		if (VirtualFont *vf = dynamic_cast<VirtualFont*>(font)) {
+		if (auto vf = dynamic_cast<VirtualFont*>(font)) {
 			// read vf file, register its font and character definitions
 			fm.enterVF(vf);
 			ifstream ifs(vf->path(), ios::binary);

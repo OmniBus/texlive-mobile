@@ -947,7 +947,7 @@ static void init_pdf_outputparameters(PDF pdf)
     pdf->inclusion_copy_font = fix_int(pdf_inclusion_copy_font, 0, 1);
     pdf->pk_resolution = fix_int(pdf_pk_resolution, 72, 8000);
     pdf->pk_fixed_dpi = fix_int(pdf_pk_fixed_dpi, 0, 1);
-    if ((pdf->minor_version >= 5) && (pdf->objcompresslevel > 0)) {
+    if (((pdf->major_version > 1) || (pdf->minor_version >= 5)) && (pdf->objcompresslevel > 0)) {
         pdf->os_enable = true;
     } else {
         if (pdf->objcompresslevel > 0) {
@@ -1777,7 +1777,12 @@ void pdf_end_page(PDF pdf)
     if (callback_id > 0)
       run_callback(callback_id, "b->",(global_shipping_mode == SHIPPING_PAGE));
     if (global_shipping_mode == SHIPPING_PAGE) {
-        pdf->last_pages = pdf_do_page_divert(pdf, pdf->last_page, 0);
+        int location = 0;
+        int callback_id = callback_defined(page_order_index_callback);
+        if (callback_id) {
+            run_callback(callback_id, "d->d", total_pages, &location);
+        }
+        pdf->last_pages = pdf_do_page_divert(pdf, pdf->last_page, location);
         /*tex  Write out the |/Page| object. */
         pdf_begin_obj(pdf, pdf->last_page, OBJSTM_ALWAYS);
         pdf_begin_dict(pdf);
@@ -2482,14 +2487,17 @@ void scan_pdfcatalog(PDF pdf)
     real conforming to the implementation limits of \PDF\ as specified in
     appendix C.1 of the \PDF\ standard. The maximum value of ints is |+2^32|, the
     maximum value of reals is |+2^15| and the smallest values of reals is
-    |1/(2^16)|.
+    |1/(2^16)|. We are quite large on precision, because it could happen that a
+    pdf file imported as figure has real numbers with an unusual (and possibly useless)
+    high precision. Later the formatter will write the numbers in the correct format.
 
 */
 
 static pdffloat conv_double_to_pdffloat(double n)
 {
     pdffloat a;
-    a.e = 6;
+/*  was  a.e = 6; */
+    a.e = 9 ;
     a.m = i64round(n * ten_pow[a.e]);
     return a;
 }

@@ -11,6 +11,8 @@
 
 #include "kp.h"
 
+#define BUFFERLEN 4096
+
 struct dictionary{
 UChar* dic[2];
 };
@@ -52,7 +54,7 @@ int dicread(const char *filename)
 {
 	int i,ecount=0;
 	const char *envfile;
-	char buff[4096];
+	char buff[BUFFERLEN];
 	FILE *fp;
 
 	if (filename!=NULL) {
@@ -68,7 +70,7 @@ int dicread(const char *filename)
 		verb_printf(efp,"Scanning dictionary file %s.",filename);
 
 		for (i=0;;i++) {
-			if (fgets(buff,4095,fp)==NULL) break;
+			if (fgets(buff,BUFFERLEN-1,fp)==NULL) break;
 			if ((buff[0]=='\r')||(buff[0]=='\n')||(buff[0]=='\0')) i--;
 		}
 		fclose(fp);
@@ -185,7 +187,7 @@ static int dcomp(const void *bf1, const void *bf2)
 int convert(UChar *buff1, UChar *buff2)
 {
 	int i=0,j=0,k;
-	char errbuff[4096],errbuff2[4096];
+	char errbuff[BUFFERLEN],errbuff2[BUFFERLEN];
 	int wclen;
 	UChar buff3[3];
 
@@ -196,9 +198,9 @@ int convert(UChar *buff1, UChar *buff2)
 		}
 		else {
 			wclen = is_surrogate_pair(&buff1[i]) ? 2 : 1;
-			              buff3[0]    =buff1[i];
-			if (wclen==2) buff3[1]    =buff1[i+1];
-			              buff3[wclen]=L'\0';
+			               buff3[0]    =buff1[i];
+			if (wclen==2){ buff3[1]    =buff1[i+1]; }
+			               buff3[wclen]=L'\0';
 
 			if ( lorder==1 &&( buff1[i]==' ' || buff1[i]=='\t' || buff3[0]==0x00A0
 				|| buff3[0]==0x202F || buff3[0]==0x2060 || buff3[0]==0xFEFF )) {
@@ -215,7 +217,8 @@ int convert(UChar *buff1, UChar *buff2)
 				 ||is_jpn_kana(buff3)||is_kor_hngl(buff3)||is_zhuyin(buff3)
 					||is_comb_diacritical_mark(buff3)) {
 				buff2[j]=buff3[0];
-				i++;
+				if (wclen==2) buff2[j+1]=buff3[1];
+				i+=wclen;
 				j+=wclen;
 			}
 
@@ -267,8 +270,8 @@ int convert(UChar *buff1, UChar *buff2)
 							j+=wclen;
 						}
 						else {
-							widechar_to_multibyte(errbuff2,4096,&buff1[i]);
-							sprintf(errbuff,"\nError: %s is no entry in dictionary file ",errbuff2);
+							widechar_to_multibyte(errbuff2,BUFFERLEN,&buff1[i]);
+							snprintf(errbuff,BUFFERLEN,"\nError: %s is no entry in dictionary file ",errbuff2);
 							fputs(errbuff,efp);
 							if (efp!=stderr) fputs(errbuff,stderr);
 							return -1;

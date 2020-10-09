@@ -1,3 +1,72 @@
+2020-03-27  Karl Berry  <karl@tug.org>
+
+	* TeX Live 2020.
+
+2020-02-25  Hironobu Yamashita  <h.y.acetaminophen@gmail.com>
+
+	* xetex.web: Allow fetching value from a token defined by
+	\Umathchardef, to be compatible with LuaTeX. Fixes #109.
+
+2020-02-23  Clerk Ma  <maqiyuan130324@vip.qq.com>
+
+	* xetex.web: Fix a potential bug in the primitive
+	\XeTeXinterchartoks.
+
+2020-02-22  Clerk Ma  <maqiyuan130324@vip.qq.com>
+
+	* xetex.web: Fix a bug in the primitive \pdfsavepos.
+
+2020-02-10  Akira Kakuto  <kakuto@w32tex.org>
+
+	* xetex.ch: Sync with tex.ch for changes by Phelype Oleinik
+	to support \input {...}.
+
+2019-12-31  Akira Kakuto  <kakuto@w32tex.org>
+
+	* XeTeX_ext.c: Support system poppler version 0.84.0.
+
+2019-12-10  Hironori Kitagawa  <h_kitagawa2001@yahoo.co.jp>
+
+	* xetex.defines (gzFile): move to ../web2c/common.defines.
+
+2019-06-30  Hironori Kitagawa  <h_kitagawa2001@yahoo.co.jp>
+
+	* xetex-filedump.test, filedump.tex, filedump.log: New tests.
+	* am/xetex.am: Adjusted for new test.
+
+2019-05-30  Khaled Hosny  <dr.khaled.hosny@gmail.com>
+
+	* XeTeXLayoutInterface.cpp: Do not use hb-icu if HarfBuzz
+	version is 2.5.0 or newer.
+
+2019-01-03  Akira Kakuto  <kakuto@fuk.kindai.ac.jp>
+
+	* NEWS, xetex_version.h, xetex.web: Sync with the upstream.
+	XeTeX version is 0.999991.
+
+2018-12-25  Akira Kakuto  <kakuto@fuk.kindai.ac.jp>
+
+	* pdfimage.cpp: Simplify the support of Rotate.
+
+2018-12-24  Stefan Br\"uns  <stefan.bruens@rwth-aachen.de>
+
+	* pdfimage.cpp: Avoid modification of internal poppler object,
+	fix compilation with poppler 0.70.0 and newer ones.
+	Improve the change on 2018-10-22.
+
+2018-11-17  Joseph Wright  <joseph.wright@morningstar2.co.uk>
+
+	* xetex.web, xetex.defines: Support some primitives from
+	pdfTeX in XeTeX. Add \expanded and extend \Uchar a bit.
+
+2018-10-22  Akira Kakuto  <kakuto@fuk.kindai.ac.jp>
+
+	* pdfimage.cpp: Support poppler 0.70.0.
+
+2018-09-09  Karl Berry  <karl@tug.org>
+
+	* xetex-bug73.test: LC_ALL=LANGUAGE=C.
+
 2018-05-11  Akira Kakuto  <kakuto@fuk.kindai.ac.jp>
 
 	* XeTeX_pic.c: Allow non-ascii image names (W32 only).

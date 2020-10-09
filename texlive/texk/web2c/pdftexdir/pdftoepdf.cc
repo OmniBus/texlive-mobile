@@ -166,16 +166,6 @@ static XRef *xref = 0;
 static PdfDocument *find_add_document(char *file_name)
 {
     PdfDocument *p = pdfDocuments;
-#ifdef _WIN32
-    int file_name_is_changed = 0;
-    wchar_t *fnamew;
-    if (file_system_codepage == CP_UTF8 && win32_codepage != CP_UTF8) {
-        fnamew = get_wstring_from_mbstring(CP_UTF8, file_name, fnamew=NULL);
-        file_name = get_mbstring_from_wstring(win32_codepage, fnamew, file_name=NULL);
-        file_name_is_changed = 1;
-        xfree(fnamew);
-    }
-#endif
     while (p && strcmp(p->file_name, file_name) != 0)
         p = p->next;
     if (p) {
@@ -195,10 +185,6 @@ static PdfDocument *find_add_document(char *file_name)
     p->inObjList = 0;
     p->next = pdfDocuments;
     pdfDocuments = p;
-#ifdef _WIN32
-    if (file_name_is_changed == 1)
-        xfree(file_name);
-#endif
     return p;
 }
 
@@ -733,7 +719,7 @@ static PDFRectangle *get_pagebox(Page * page, int pagebox_spec)
 
 int
 read_pdf_info(char *image_name, char *page_name, int page_num,
-              int pagebox_spec, int minor_pdf_version_wanted,
+              int pagebox_spec, int major_pdf_version_wanted, int minor_pdf_version_wanted,
               int pdf_inclusion_errorlevel)
 {
     PdfDocument *pdf_doc;
@@ -761,21 +747,21 @@ read_pdf_info(char *image_name, char *page_name, int page_num,
 #ifdef POPPLER_VERSION
     pdf_major_version_found = pdf_doc->doc->getPDFMajorVersion();
     pdf_minor_version_found = pdf_doc->doc->getPDFMinorVersion();
-    if ((pdf_major_version_found > 1)
+    if ((pdf_major_version_found > major_pdf_version_wanted)
      || (pdf_minor_version_found > minor_pdf_version_wanted)) {
         const char *msg =
-            "PDF inclusion: found PDF version <%d.%d>, but at most version <1.%d> allowed";
+            "PDF inclusion: found PDF version <%d.%d>, but at most version <%d.%d> allowed";
         if (pdf_inclusion_errorlevel > 0) {
-            pdftex_fail(msg, pdf_major_version_found, pdf_minor_version_found, minor_pdf_version_wanted);
+            pdftex_fail(msg, pdf_major_version_found, pdf_minor_version_found, major_pdf_version_wanted, minor_pdf_version_wanted);
         } else if (pdf_inclusion_errorlevel < 0) {
             ; /* do nothing */
         } else { /* = 0, give warning */
-            pdftex_warn(msg, pdf_major_version_found, pdf_minor_version_found, minor_pdf_version_wanted);
+            pdftex_warn(msg, pdf_major_version_found, pdf_minor_version_found, major_pdf_version_wanted, minor_pdf_version_wanted);
         }
     }
 #else
     pdf_version_found = pdf_doc->doc->getPDFVersion();
-    pdf_version_wanted = 1 + (minor_pdf_version_wanted * 0.1);
+    pdf_version_wanted = major_pdf_version_wanted + (minor_pdf_version_wanted * 0.1);
     if (pdf_version_found > pdf_version_wanted + 0.01) {
         char msg[] =
             "PDF inclusion: found PDF version <%.1f>, but at most version <%.1f> allowed";

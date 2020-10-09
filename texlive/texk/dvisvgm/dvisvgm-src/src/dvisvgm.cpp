@@ -2,7 +2,7 @@
 ** dvisvgm.cpp                                                          **
 **                                                                      **
 ** This file is part of dvisvgm -- a fast DVI to SVG converter          **
-** Copyright (C) 2005-2018 Martin Gieseking <martin.gieseking@uos.de>   **
+** Copyright (C) 2005-2020 Martin Gieseking <martin.gieseking@uos.de>   **
 **                                                                      **
 ** This program is free software; you can redistribute it and/or        **
 ** modify it under the terms of the GNU General Public License as       **
@@ -26,7 +26,6 @@
 #include <potracelib.h>
 #include <sstream>
 #include <vector>
-#include <xxhash.h>
 #include <zlib.h>
 #include "CommandLine.hpp"
 #include "DVIToSVG.hpp"
@@ -37,6 +36,7 @@
 #include "Font.hpp"
 #include "FontEngine.hpp"
 #include "Ghostscript.hpp"
+#include "HashFunction.hpp"
 #include "HyperlinkManager.hpp"
 #include "Message.hpp"
 #include "PageSize.hpp"
@@ -45,8 +45,10 @@
 #include "PsSpecialHandler.hpp"
 #include "SignalHandler.hpp"
 #include "SourceInput.hpp"
+#include "optimizer/SVGOptimizer.hpp"
 #include "SVGOutput.hpp"
 #include "System.hpp"
+#include "XXHashFunction.hpp"
 #include "utility.hpp"
 #include "version.hpp"
 
@@ -62,7 +64,7 @@ using namespace std;
 ////////////////////////////////////////////////////////////////////////////////
 
 static string remove_path (string fname) {
-	fname = FileSystem::adaptPathSeperators(fname);
+	fname = FileSystem::ensureForwardSlashes(fname);
 	size_t slashpos = fname.rfind('/');
 	if (slashpos == string::npos)
 		return fname;
@@ -107,22 +109,36 @@ static void set_libgs (CommandLine &args) {
 static bool set_cache_dir (const CommandLine &args) {
 	if (args.cacheOpt.given() && !args.cacheOpt.value().empty()) {
 		if (args.cacheOpt.value() == "none")
-			PhysicalFont::CACHE_PATH = 0;
+			PhysicalFont::CACHE_PATH.clear();
 		else if (FileSystem::exists(args.cacheOpt.value()))
-			PhysicalFont::CACHE_PATH = args.cacheOpt.value().c_str();
+			PhysicalFont::CACHE_PATH = args.cacheOpt.value();
 		else
 			Message::wstream(true) << "cache directory '" << args.cacheOpt.value() << "' does not exist (caching disabled)\n";
 	}
-	else if (const char *userdir = FileSystem::userdir()) {
-		static string cachepath = userdir + string("/.dvisvgm/cache");
+	else {
+		string &cachepath = PhysicalFont::CACHE_PATH;
+		const char *cachehome = getenv("XDG_CACHE_HOME");
+		if (!cachehome || util::trim(cachehome).empty()) {
+#ifdef _WIN32
+			cachehome = "~\\.cache";
+#else
+			cachehome = "~/.cache";
+#endif
+		}
+		cachepath = util::trim(cachehome) + FileSystem::PATHSEP + "dvisvgm";
+		if (cachepath[0] == '~' && cachepath[1] == FileSystem::PATHSEP) {
+			if (FileSystem::userdir())
+				cachepath.replace(0, 1, FileSystem::userdir());
+			else
+				cachepath.erase(0, 2);  // strip leading "~/"
+		}
 		if (!FileSystem::exists(cachepath))
 			FileSystem::mkdir(cachepath);
-		PhysicalFont::CACHE_PATH = cachepath.c_str();
 	}
 	if (args.cacheOpt.given() && args.cacheOpt.value().empty()) {
-		cout << "cache directory: " << (PhysicalFont::CACHE_PATH ? PhysicalFont::CACHE_PATH : "(none)") << '\n';
+		cout << "cache directory: " << (PhysicalFont::CACHE_PATH.empty() ? "(none)" : PhysicalFont::CACHE_PATH) << '\n';
 		try {
-			if (PhysicalFont::CACHE_PATH)
+			if (!PhysicalFont::CACHE_PATH.empty())
 				FontCache::fontinfo(PhysicalFont::CACHE_PATH, cout, true);
 		}
 		catch (StreamReaderException &e) {
@@ -137,7 +153,7 @@ static bool set_cache_dir (const CommandLine &args) {
 static bool set_temp_dir (const CommandLine &args) {
 	if (args.tmpdirOpt.given()) {
 		if (!args.tmpdirOpt.value().empty())
-			FileSystem::TMPDIR = args.tmpdirOpt.value().c_str();
+			FileSystem::TMPDIR = args.tmpdirOpt.value();
 		else {
 			cout << "temporary folder: " << FileSystem::tmpdir() << '\n';
 			return false;
@@ -159,9 +175,11 @@ static void check_bbox (const string &bboxstr) {
 			throw MessageException("invalid bounding box format '" + bboxstr + "'");
 		}
 	}
-	// check if given bbox argument is valid, i.e. doesn't throw an exception
-	BoundingBox bbox;
-	bbox.set(bboxstr);
+	else {
+		// check if given bbox argument is valid, i.e. doesn't throw an exception
+		BoundingBox bbox;
+		bbox.set(bboxstr);
+	}
 }
 
 
@@ -247,7 +265,7 @@ static void print_version (bool extended) {
 		versionInfo.add("clipper", CLIPPER_VERSION);
 		versionInfo.add("freetype", FontEngine::version());
 		versionInfo.add("potrace", strchr(potrace_version(), ' '));
-		versionInfo.add("xxhash", XXH_versionNumber(), 3, 100);
+		versionInfo.add("xxhash", XXH64HashFunction::version(), 3, 100);
 		versionInfo.add("zlib", zlibVersion());
 		versionInfo.add("Ghostscript", Ghostscript().revisionstr(), true);
 #ifndef DISABLE_WOFF
@@ -285,6 +303,39 @@ static void init_fontmap (const CommandLine &cmdline) {
 }
 
 
+/** Returns a unique string for the current state of the command-line
+ *  options affecting the SVG output. */
+static string svg_options_hash (const CommandLine &cmdline) {
+	// options affecting the SVG output
+	vector<const CL::Option*> svg_options = {
+		&cmdline.bboxOpt,	&cmdline.clipjoinOpt, &cmdline.colornamesOpt, &cmdline.commentsOpt,
+		&cmdline.exactBboxOpt, &cmdline.fontFormatOpt, &cmdline.fontmapOpt, &cmdline.gradOverlapOpt,
+		&cmdline.gradSegmentsOpt, &cmdline.gradSimplifyOpt, &cmdline.linkmarkOpt, &cmdline.magOpt,
+		&cmdline.noFontsOpt, &cmdline.noMergeOpt,	&cmdline.noSpecialsOpt, &cmdline.noStylesOpt,
+		&cmdline.optimizeOpt, &cmdline.precisionOpt, &cmdline.relativeOpt, &cmdline.zoomOpt
+	};
+	string idString = get_transformation_string(cmdline);
+	for (const CL::Option *opt : svg_options) {
+		idString += char(opt->given());
+		idString += opt->valueString();
+	}
+	return XXH64HashFunction(idString).digestString();
+}
+
+
+static bool list_page_hashes (const CommandLine &cmdline, DVIToSVG &dvisvg) {
+	if (cmdline.pageHashesOpt.given()) {
+		DVIToSVG::PAGE_HASH_SETTINGS.setParameters(cmdline.pageHashesOpt.value());
+		DVIToSVG::PAGE_HASH_SETTINGS.setOptionHash(svg_options_hash(cmdline));
+		if (DVIToSVG::PAGE_HASH_SETTINGS.isSet(DVIToSVG::HashSettings::P_LIST)) {
+			dvisvg.listHashes(cmdline.pageOpt.value(), cout);
+			return true;
+		}
+	}
+	return false;
+}
+
+
 static void set_variables (const CommandLine &cmdline) {
 	Message::COLORIZE = cmdline.colorOpt.given();
 	if (cmdline.progressOpt.given()) {
@@ -296,10 +347,9 @@ static void set_variables (const CommandLine &cmdline) {
 	SVGTree::USE_FONTS = !cmdline.noFontsOpt.given();
 	if (!SVGTree::setFontFormat(cmdline.fontFormatOpt.value())) {
 		string msg = "unknown font format '"+cmdline.fontFormatOpt.value()+"' (supported formats: ";
-		ostringstream oss;
 		for (const string &format : FontWriter::supportedFormats())
-			oss << ", " << format;
-		msg += oss.str().substr(2) + ')';
+			msg += format + ", ";
+		msg.erase(msg.end()-2);
 		throw CL::CommandLineException(msg);
 	}
 	SVGTree::CREATE_USE_ELEMENTS = cmdline.noFontsOpt.value() < 1;
@@ -309,14 +359,35 @@ static void set_variables (const CommandLine &cmdline) {
 	SVGTree::ADD_COMMENTS = cmdline.commentsOpt.given();
 	DVIToSVG::TRACE_MODE = cmdline.traceAllOpt.given() ? (cmdline.traceAllOpt.value() ? 'a' : 'm') : 0;
 	Message::LEVEL = cmdline.verbosityOpt.value();
-	PhysicalFont::EXACT_BBOX = cmdline.exactOpt.given();
+	PhysicalFont::EXACT_BBOX = cmdline.exactBboxOpt.given();
 	PhysicalFont::KEEP_TEMP_FILES = cmdline.keepOpt.given();
 	PhysicalFont::METAFONT_MAG = max(1.0, cmdline.magOpt.value());
 	XMLString::DECIMAL_PLACES = max(0, min(6, cmdline.precisionOpt.value()));
+	XMLNode::KEEP_ENCODED_FILES = cmdline.keepOpt.given();
 	PsSpecialHandler::COMPUTE_CLIPPATHS_INTERSECTIONS = cmdline.clipjoinOpt.given();
 	PsSpecialHandler::SHADING_SEGMENT_OVERLAP = cmdline.gradOverlapOpt.given();
 	PsSpecialHandler::SHADING_SEGMENT_SIZE = max(1, cmdline.gradSegmentsOpt.value());
 	PsSpecialHandler::SHADING_SIMPLIFY_DELTA = cmdline.gradSimplifyOpt.value();
+	PsSpecialHandler::BITMAP_FORMAT = util::tolower(cmdline.bitmapFormatOpt.value());
+	if (!PSInterpreter::imageDeviceKnown(PsSpecialHandler::BITMAP_FORMAT)) {
+		ostringstream oss;
+		oss << "unknown image format '" << PsSpecialHandler::BITMAP_FORMAT << "'\nknown formats:\n";
+		PSInterpreter::listImageDeviceInfos(oss);
+		throw CL::CommandLineException(oss.str());
+	}
+	if (cmdline.optimizeOpt.given()) {
+		SVGOptimizer::MODULE_SEQUENCE = cmdline.optimizeOpt.value();
+		vector<string> modnames;
+		if (!SVGOptimizer().checkModuleString(SVGOptimizer::MODULE_SEQUENCE, modnames)) {
+			string msg = "invalid optimizer module";
+			if (modnames.size() > 1) msg += 's';
+			msg += ": ";
+			for (const string &modname : modnames)
+				msg += modname + ", ";
+			msg.erase(msg.end()-2);
+			throw CL::CommandLineException(msg);
+		}
+	}
 }
 
 
@@ -350,6 +421,10 @@ int main (int argc, char *argv[]) {
 		if (cmdline.listSpecialsOpt.given()) {
 			DVIToSVG::setProcessSpecials();
 			SpecialManager::instance().writeHandlerInfo(cout);
+			return 0;
+		}
+		if (cmdline.optimizeOpt.value() == "list") {
+			SVGOptimizer().listModules(cout);
 			return 0;
 		}
 		if (!set_cache_dir(cmdline) || !set_temp_dir(cmdline))
@@ -390,6 +465,8 @@ int main (int argc, char *argv[]) {
 		else {
 			init_fontmap(cmdline);
 			DVIToSVG dvi2svg(srcin.getInputStream(), out);
+			if (list_page_hashes(cmdline, dvi2svg))
+				return 0;
 			const char *ignore_specials=nullptr;
 			if (cmdline.noSpecialsOpt.given())
 				ignore_specials = cmdline.noSpecialsOpt.value().empty() ? "*" : cmdline.noSpecialsOpt.value().c_str();

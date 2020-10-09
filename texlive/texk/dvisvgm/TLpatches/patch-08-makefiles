@@ -1,103 +1,153 @@
-diff -u1r dvisvgm-2.5/Makefile.am dvisvgm-src/Makefile.am
---- dvisvgm-2.5/Makefile.am	2018-07-31 07:51:05.000000000 -0700
-+++ dvisvgm-src/Makefile.am	2018-08-27 09:10:41.553596312 -0700
-@@ -7,3 +7,3 @@
+	See ./TL-Changes.
+
+--- dvisvgm-2.8.2/Makefile.am	2019-07-08 17:24:34.000000000 +0200
++++ dvisvgm-src/Makefile.am	2019-11-16 13:57:04.091210187 +0100
+@@ -5,7 +5,7 @@
+ 
+ AUTOMAKE_OPTIONS = foreign
  EXTRA_DIST = COPYING
--SUBDIRS = libs src tests doc
-+SUBDIRS = libs src #not for TL: tests doc
+-SUBDIRS = libs m4 src tests doc
++SUBDIRS = libs src #not for TL: m4 tests doc
  ACLOCAL_AMFLAGS = -I m4
-diff -u1r dvisvgm-2.5/src/Makefile.am dvisvgm-src/src/Makefile.am
---- dvisvgm-2.5/src/Makefile.am	2018-07-31 07:53:41.000000000 -0700
-+++ dvisvgm-src/src/Makefile.am	2018-08-27 16:28:25.615599693 -0700
-@@ -14,6 +14,3 @@
- 	$(noinst_LIBRARIES) \
--	../libs/clipper/libclipper.a \
+ 
+ if USE_BUNDLED_LIBS
+--- dvisvgm-2.8.2/src/Makefile.am	2019-09-12 14:43:35.000000000 +0200
++++ dvisvgm-src/src/Makefile.am	2019-11-16 15:54:55.820450555 +0100
+@@ -4,7 +4,7 @@
+ ## Process this file with automake.
+ 
+ bin_PROGRAMS     = dvisvgm
+-noinst_LTLIBRARIES = libdvisvgm.la
++noinst_LIBRARIES = libdvisvgm.a
+ SUBDIRS = optimizer
+ 
+ dvisvgm_SOURCES = \
+@@ -14,13 +14,11 @@
+ include ../libs/defs.am
+ 
+ dvisvgm_LDADD = \
+-	$(noinst_LTLIBRARIES) \
++	$(noinst_LIBRARIES) \
++	optimizer/liboptimizer.a \
+ 	../libs/clipper/libclipper.a \
 -	$(FREETYPE_LIBS) \
 -	$(FONTFORGE_LIBS) \
+ 	$(POTRACE_LIBS) \
+-	$(XXHASH_LIBS) \
 -	$(ZLIB_LIBS)
-+	../libs/clipper/libclipper.a
++	$(XXHASH_LIBS)
  
-@@ -43,3 +40,11 @@
+ if ENABLE_WOFF
+ dvisvgm_LDADD += \
+@@ -35,9 +33,17 @@
+ dvisvgm_LDADD += $(LIBCRYPTO_LIBS)
+ endif
  
+-dvisvgm_DEPENDENCIES = $(noinst_LTLIBRARIES)
 +dvisvgm_LDADD += \
 +	$(KPATHSEA_LIBS) \
 +	$(FREETYPE2_LIBS) \
 +	$(FONTFORGE_LIBS) \
 +	$(ZLIB_LIBS) \
 +	$(LIBGS_LIBS)
-+
- dvisvgm_DEPENDENCIES = $(noinst_LIBRARIES)
-+dvisvgm_DEPENDENCIES += $(KPATHSEA_DEPEND) $(ZLIB_DEPEND) $(FREETYPE2_DEPEND)
  
-@@ -263,18 +268,16 @@
+-libdvisvgm_la_SOURCES = \
++dvisvgm_DEPENDENCIES = $(noinst_LIBRARIES)
++dvisvgm_DEPENDENCIES += $(KPATHSEA_DEPEND) $(ZLIB_DEPEND) $(FREETYPE2_DEPEND)
++
++libdvisvgm_a_SOURCES = \
+ 	AGLTable.hpp \
+ 	BasicDVIReader.hpp           BasicDVIReader.cpp \
+ 	Bezier.hpp                   Bezier.cpp \
+@@ -160,28 +166,31 @@
+ 	ZLibOutputStream.hpp
+ 
+ if ENABLE_WOFF
+-libdvisvgm_la_SOURCES += ffwrapper.c ffwrapper.h
++libdvisvgm_a_SOURCES += ffwrapper.c ffwrapper.h
+ endif
+ 
+-libdvisvgm_la_LIBADD = optimizer/liboptimizer.la
+-
+ EXTRA_DIST = options.xml options.dtd iapi.h ierrors.h MiKTeXCom.hpp MiKTeXCom.cpp
  
 -AM_CFLAGS = -Wall \
--	$(ZLIB_CFLAGS) \
--	$(CODE_COVERAGE_CFLAGS)
-+dvisvgm_srcdir = $(top_srcdir)/dvisvgm-src
- 
--AM_CXXFLAGS = -Wall -Wnon-virtual-dtor -Wno-mismatched-tags \
--	-I$(top_srcdir)/libs/clipper \
--	-I$(top_srcdir)/libs/variant/include \
--	$(KPSE_CFLAGS) \
--	$(FREETYPE_CFLAGS) \
 -	$(ZLIB_CFLAGS) \
 +AM_CFLAGS = $(WARNING_CFLAGS) \
 +	$(ZLIB_INCLUDES) \
  	$(CODE_COVERAGE_CFLAGS)
  
-+AM_CXXFLAGS = $(WARNING_CFLAGS) -Wnon-virtual-dtor -Wno-mismatched-tags \
-+	-I$(dvisvgm_srcdir)/libs/clipper \
+-AM_CXXFLAGS = -Wall -Wnon-virtual-dtor \
++AM_CXXFLAGS = $(WARNING_CXXFLAGS) -Wnon-virtual-dtor \
+ 	-I$(dvisvgm_srcdir)/libs/clipper \
+-	-I$(dvisvgm_srcdir)/libs/variant/include \
+-	$(KPSE_CFLAGS) \
+-	$(FREETYPE_CFLAGS) \
+-	$(ZLIB_CFLAGS) \
+-	$(CODE_COVERAGE_CFLAGS)
 +	-I$(dvisvgm_srcdir)/libs/variant/include
-+
- if USE_BUNDLED_LIBS
- AM_CXXFLAGS +=  \
--	-I$(top_srcdir)/libs/potrace \
--	-I$(top_srcdir)/libs/xxHash
-+	-I$(dvisvgm_srcdir)/libs/potrace \
-+	-I$(dvisvgm_srcdir)/libs/xxHash
- else
-@@ -291,4 +294,4 @@
- AM_CFLAGS +=  \
--	-I$(top_srcdir)/libs/ff-woff/fontforge \
--	-I$(top_srcdir)/libs/ff-woff/inc
-+	-I$(dvisvgm_srcdir)/libs/ff-woff/fontforge \
-+	-I$(dvisvgm_srcdir)/libs/ff-woff/inc
  
-@@ -298,4 +301,4 @@
- AM_CXXFLAGS +=  \
--	-I$(top_srcdir)/libs/brotli/include \
--	-I$(top_srcdir)/libs/woff2/include
-+	-I$(dvisvgm_srcdir)/libs/brotli/include \
-+	-I$(dvisvgm_srcdir)/libs/woff2/include
- else
-@@ -309,3 +312,16 @@
- 
-+AM_CXXFLAGS += \
+ AM_CXXFLAGS += \
+ 	$(POTRACE_CFLAGS) \
+-	$(XXHASH_CFLAGS)
++	$(XXHASH_CFLAGS) \
 +	$(KPATHSEA_INCLUDES) \
 +	$(POTRACE_INCLUDES) \
 +	$(FREETYPE2_INCLUDES) \
-+	$(ZLIB_INCLUDES) \
 +	$(LIBGS_INCLUDES) \
 +	$(CODE_COVERAGE_CFLAGS)
- 
++
 +if WIN32
 +AM_CXXFLAGS += -DTEXLIVEWIN32
 +endif WIN32
-+
-+if ! TEXLIVE_BUILD
+ 
+ AM_LDFLAGS = \
+ 	$(KPSE_LIBS) \
+@@ -192,8 +201,6 @@
+ 	-I$(dvisvgm_srcdir)/libs/ff-woff/fontforge \
+ 	-I$(dvisvgm_srcdir)/libs/ff-woff/inc
+ 
+-AM_CXXFLAGS += $(TTFAUTOHINT_CFLAGS)
+-
+ AM_CXXFLAGS +=  \
+ 	$(BROTLI_CFLAGS) \
+ 	$(WOFF2_CFLAGS)
+@@ -204,9 +211,10 @@
+ AM_CXXFLAGS += $(LIBCRYPTO_CFLAGS)
+ endif
+ 
+-AM_LDFLAGS += $(TTFAUTOHINT_LIBS)
+ endif
+ 
 +# TL: do not try to rebuild these source files.
++if ! TEXLIVE_BUILD
+ 
  # the command-line parser class is generated from options.xml by opt2cpp
-@@ -322,2 +338,3 @@
+ $(srcdir)/CommandLine.hpp: options.xml
+@@ -220,7 +228,15 @@
+ 	fi
+ 
  psdefs.ps: ;
 +endif ! TEXLIVE_BUILD
  
-@@ -326 +343,8 @@
+ @CODE_COVERAGE_RULES@
+ 
  CLEANFILES = *.gcda *.gcno
 +
-+## Rebuild libkpathsea
++# Rebuild libkpathsea:
 +@KPATHSEA_RULE@
-+## Rebuild libfreetype
++# Rebuild libfreetype:
 +@FREETYPE2_RULE@
-+## Rebuild libz
++# Rebuild libz:
 +@ZLIB_RULE@
+--- dvisvgm-2.8.2/src/optimizer/Makefile.am	2019-11-08 15:26:11.000000000 +0100
++++ dvisvgm-src/src/optimizer/Makefile.am	2019-11-16 15:15:54.151760519 +0100
+@@ -1,6 +1,6 @@
+-noinst_LTLIBRARIES = liboptimizer.la
++noinst_LIBRARIES = liboptimizer.a
+ 
+-liboptimizer_la_SOURCES = \
++liboptimizer_a_SOURCES = \
+ 	AttributeExtractor.hpp      AttributeExtractor.cpp \
+ 	DependencyGraph.hpp \
+ 	GroupCollapser.hpp          GroupCollapser.cpp  \
